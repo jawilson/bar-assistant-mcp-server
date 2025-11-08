@@ -146,14 +146,12 @@ npm run build
 ## Next Steps
 
 - Read the full [README.md](README.md) for detailed features
-- Check [CONTRIBUTING.md](CONTRIBUTING.md) if you want to contribute
 - Explore the available tools and their parameters
 
 ## Need Help?
 
 - Check the [README.md](README.md) for detailed documentation
 - Review test examples in `test/run-tests.ts`
-- Open a GitHub issue for bugs or questions
 
 ---
 
