@@ -1,0 +1,51 @@
+{
+  "name": "bar-assistant-mcp-server",
+  "version": "1.0.0",
+  "description": "High-performance MCP Server for Bar Assistant - intelligent cocktail search and recipe retrieval",
+  "main": "dist/src/bar-assistant-mcp-server.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/bar-assistant-mcp-server.js",
+    "dev": "tsc --watch",
+    "test": "npm run build && node dist/test/run-tests.js",
+    "test:negroni": "npm run build && node dist/test/run-tests.js negroni",
+    "test:recipe": "npm run build && node dist/test/run-tests.js recipe",
+    "test:linden": "npm run build && node dist/test/run-tests.js linden",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "bar-assistant",
+    "cocktails",
+    "recipes",
+    "bartending",
+    "mixology",
+    "ai",
+    "llm",
+    "claude",
+    "copilot"
+  ],
+  "author": "Bar Assistant MCP Server Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/bar-assistant-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/bar-assistant-mcp-server/issues"
+  },
+  "homepage": "https://github.com/yourusername/bar-assistant-mcp-server#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0",
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
