@@ -2,6 +2,11 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import express, { Request, Response, NextFunction } from 'express';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -2414,8 +2419,94 @@ Returns detailed ingredient information including:
     await this.server.connect(transport);
     // Server is now running - no output to avoid interfering with MCP protocol
   }
+
+  async runSSE(port: number): Promise<void> {
+    const app = express();
+    
+    // Security middleware
+    app.use(helmet());
+    app.use(morgan('combined'));
+    
+    // Rate limiting: 100 requests per 15 minutes
+    const limiter = rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 100,
+      standardHeaders: true,
+      legacyHeaders: false,
+    });
+    app.use(limiter);
+
+    // API Key Authentication
+    const apiKey = process.env.MCP_API_KEY;
+    if (!apiKey) {
+      console.warn('⚠️  WARNING: MCP_API_KEY environment variable is not set!');
+      console.warn('   The server is running without authentication. This is NOT recommended for public exposure.');
+    }
+
+    const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+      if (!apiKey) return next(); // Skip auth if no key configured (dev mode)
+
+      const authHeader = req.headers.authorization;
+      const queryKey = req.query.apiKey as string;
+      
+      // Check Bearer token
+      if (authHeader && authHeader.startsWith('Bearer ') && authHeader.slice(7) === apiKey) {
+        return next();
+      }
+      
+      // Check X-API-Key header
+      if (req.headers['x-api-key'] === apiKey) {
+        return next();
+      }
+
+      // Check query parameter (fallback for clients that can't set headers)
+      if (queryKey === apiKey) {
+        return next();
+      }
+
+      res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
+    };
+
+    app.use(authMiddleware);
+
+    // Keep track of the current transport
+    let transport: SSEServerTransport | null = null;
+
+    app.get('/sse', async (req, res) => {
+      console.log('New SSE connection');
+      transport = new SSEServerTransport('/message', res);
+      await this.server.connect(transport);
+      
+      // Clean up when connection closes
+      req.on('close', () => {
+        console.log('SSE connection closed');
+        // Optionally cleanup
+      });
+    });
+
+    app.post('/message', async (req, res) => {
+      if (!transport) {
+        res.sendStatus(400);
+        return;
+      }
+      await transport.handlePostMessage(req, res);
+    });
+
+    app.listen(port, () => {
+      console.log(`Bar Assistant MCP Server running on SSE at http://localhost:${port}/sse`);
+      if (apiKey) {
+        console.log('🔒 Authentication enabled. Clients must provide the API Key.');
+      }
+    });
+  }
 }
 
 // Start the server
 const server = new BarAssistantMCPServer();
-server.run().catch(console.error);
+
+if (process.argv.includes('--sse')) {
+  const port = parseInt(process.env.PORT || '3001', 10);
+  server.runSSE(port).catch(console.error);
+} else {
+  server.run().catch(console.error);
+}
