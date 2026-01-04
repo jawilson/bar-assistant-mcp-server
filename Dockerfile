@@ -1,33 +1,61 @@
-# Stage 1: Build the application
-FROM node:18-alpine AS builder
+ARG NODE_VERSION=24
 
-# Create app directory
+################################################################################
+# Use node image for base image for all stages.
+FROM node:${NODE_VERSION}-alpine AS base
+
+# Set working directory for all build stages.
 WORKDIR /usr/src/app
 
-# Install app dependencies
-COPY package*.json ./
-RUN npm install
+################################################################################
+# Create a stage for installing production dependecies.
+FROM base AS deps
 
-# Bundle app source
+# Download dependencies as a separate step to take advantage of Docker's caching.
+# Leverage a cache mount to /root/.npm to speed up subsequent builds.
+# Leverage bind mounts to package.json and package-lock.json to avoid having to copy them
+# into this layer.
+RUN --mount=type=bind,source=package.json,target=package.json \
+    --mount=type=bind,source=package-lock.json,target=package-lock.json \
+    --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev
+
+################################################################################
+# Create a stage for building the application.
+FROM deps AS build
+
+# Download additional development dependencies such as tsc before building
+RUN --mount=type=bind,source=package.json,target=package.json \
+    --mount=type=bind,source=package-lock.json,target=package-lock.json \
+    --mount=type=cache,target=/root/.npm \
+    npm ci
+
+# Copy the rest of the source files into the image.
 COPY . .
-
-# Build the app
+# Run the build script.
 RUN npm run build
 
-# Stage 2: Create the final image
-FROM node:18-alpine
+################################################################################
+# Create a new stage to run the application with minimal runtime dependencies
+# where the necessary files are copied from the build stage.
+FROM base AS final
 
-WORKDIR /usr/src/app
+# Use production node environment by default.
+ENV NODE_ENV=production
 
-# Copy the built app from the builder stage
-COPY --from=builder /usr/src/app/dist ./dist
-COPY --from=builder /usr/src/app/package*.json ./
+# Run the application as a non-root user.
+USER node
 
-# Install only production dependencies
-RUN npm ci --only=production
+# Copy package.json so that package manager commands can be used.
+COPY package.json .
 
-# Expose the port the app runs on (assuming 3000, will ask for confirmation)
+# Copy the production dependencies from the deps stage and also
+# the built application from the build stage into the image.
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY --from=build /usr/src/app/dist ./dist
+
+# Expose the port that the application listens on.
 EXPOSE 3001
 
-# Define the command to run the app
-CMD [ "npm", "start" ]
+# Run the application.
+CMD [ "node", "dist/bar-assistant-mcp-server.js" ]
