@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import express, { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'node:crypto';
+import * as z from 'zod/v4';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport  } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport  } from '@modelcontextprotocol/sdk/server/sse.js';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
+  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { BarAssistantClient } from './bar-assistant-client.js';
@@ -38,24 +38,10 @@ import { QueryParser } from './query-parser.js';
  * through Model Context Protocol tools
  */
 class BarAssistantMCPServer {
-  private server: Server;
   private barClient: BarAssistantClient;
   private cacheManager: CacheManager;
 
   constructor() {
-    // Initialize MCP server
-    this.server = new Server(
-      {
-        name: 'bar-assistant-mcp-server',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
     // Validate required environment variables
     this.validateEnvironment();
 
@@ -75,8 +61,465 @@ class BarAssistantMCPServer {
       ttl: 5 * 60 * 1000, // 5 minutes
       maxSize: 1000 // 1000 entries
     });
+  }
 
-    this.setupToolHandlers();
+  private getServer(): McpServer {
+    // Initialize MCP server
+    const server = new McpServer(
+      {
+        name: 'bar-assistant-mcp-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    server.registerTool(
+      'smart_search_cocktails',
+      {
+        title: 'Smart Cocktail Search',
+        description: `🚀 PREFERRED TOOL: Advanced cocktail search with intelligent batch processing and complete recipes.
+
+**🎯 BATCH PROCESSING SYSTEM:**
+- **High Performance**: Parallel processing with 5-10x speed improvement
+- **Smart Caching**: Automatic caching for 70%+ faster repeated searches
+- **Error Resilience**: Individual failures don't break entire batch operations
+- **Flexible Limits**: Configure result count (default: 20, max: 50)
+
+**📋 Use Cases:**
+- General searches: "gin cocktails", "winter drinks", "classic cocktails"
+- Similarity queries: "cocktails like Manhattan", "similar to Negroni"
+- Ingredient-based: "cocktails with bourbon", "drinks using Campari"
+- Flavor profiles: "bitter cocktails", "sweet drinks", "herbal spirits"
+- Complex filtering: combine ingredients, ABV ranges, glass types, methods
+- Batch comparisons: Multiple ingredient searches simultaneously
+
+**🔄 Batch Processing Examples:**
+- Single search: {query: "Manhattan"} → Complete recipe + similar cocktails
+- Multi-ingredient: {ingredient: "gin", must_include: ["vermouth", "bitters"]}
+- Similarity batch: {similar_to: "Negroni", limit: 10} → 10 similar cocktails
+- Complex filter: {preferred_flavors: ["bitter"], abv_min: 25, limit: 15}
+
+**📊 Response Format:**
+Returns structured data with complete recipes including:
+- Ingredients with precise measurements in oz (auto-converted from ml)
+- Step-by-step preparation instructions
+- Cocktail specifications (ABV, glass, method, garnish)
+- Direct links to cocktail database pages
+- Performance metrics (processing time, cache hits)
+- Similar cocktail recommendations with full recipes
+
+**⚡ Performance Features:**
+- Parallel API processing for multiple results
+- Intelligent caching system with TTL management
+- Batch fetching of complete recipe details
+- Error isolation and fallback handling`,
+        inputSchema: z.fromJSONSchema({
+          type: 'object',
+          properties: {
+            // Core search parameters
+            query: {
+              type: 'string',
+              description: '🔍 Natural language search query (e.g., "Negroni", "gin cocktails", "bitter drinks")',
+            },
+            similar_to: {
+              type: 'string',
+              description: '🔄 Find cocktails similar to this name (e.g., "Manhattan", "Negroni"). Triggers similarity batch processing.',
+            },
+            similar_to_id: {
+              type: 'number',
+              description: '🆔 Find cocktails similar to this ID. Use similar_to (by name) unless you have the specific ID.',
+            },
+
+            // Ingredient filtering (supports batch processing)
+            ingredient: {
+              type: 'string',
+              description: '🥃 Primary ingredient filter (e.g., "gin", "whiskey", "campari"). Combines with other filters for batch processing.',
+            },
+            must_include: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '✅ Required ingredients array. Batch processes cocktails containing ALL these ingredients.',
+            },
+            must_exclude: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '❌ Excluded ingredients array. Filters out cocktails with ANY of these ingredients.',
+            },
+
+            // Advanced filtering (enhances batch results)
+            preferred_flavors: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '🎯 Flavor profile preferences: ["bitter", "sweet", "sour", "spicy", "herbal"]. Improves batch ranking.',
+            },
+            preferred_strength: {
+              type: 'string',
+              enum: ['light', 'medium', 'strong'],
+              description: '💪 Alcohol strength preference. Filters batch results by ABV ranges.',
+            },
+            abv_min: {
+              type: 'number',
+              description: '📊 Minimum ABV percentage. Lower bound for batch filtering.',
+            },
+            abv_max: {
+              type: 'number',
+              description: '📊 Maximum ABV percentage. Upper bound for batch filtering.',
+            },
+
+            // Presentation filtering
+            glass_type: {
+              type: 'string',
+              description: '🥂 Required glassware (e.g., "coupe", "rocks", "martini"). Filters entire batch.',
+            },
+            preparation_method: {
+              type: 'string',
+              description: '🔧 Required method (e.g., "shake", "stir", "build"). Filters batch by technique.',
+            },
+
+            // Batch control parameters
+            limit: {
+              type: 'number',
+              description: '🎛️ Maximum results to return (default: 20, max: 50). Controls batch size for optimal performance.',
+              default: 20,
+              minimum: 1,
+              maximum: 50,
+            },
+          },
+        }),
+        outputSchema: z.fromJSONSchema({
+          type: 'object',
+          description: '🎯 Batch processing response with complete cocktail data and performance metrics',
+          properties: {
+            search_results: {
+              type: 'object',
+              properties: {
+                total_found: {
+                  type: 'number',
+                  description: 'Total cocktails found matching criteria'
+                },
+                returned: {
+                  type: 'number',
+                  description: 'Number of cocktails returned (limited by batch size)'
+                },
+                search_type: {
+                  type: 'string',
+                  description: 'Type of search performed (query, similarity, ingredient, etc.)'
+                }
+              }
+            },
+            cocktails: {
+              type: 'array',
+              description: 'Complete cocktail recipes with full details',
+              items: { $ref: '#/$defs/cocktail' }
+            },
+            similar_cocktails: {
+              type: 'array',
+              description: 'Additional similar cocktails (when using similarity search)',
+              items: { $ref: '#/$defs/cocktail' }
+            },
+            performance_metrics: {
+              type: 'object',
+              description: 'Batch processing performance data',
+              properties: {
+                processing_time_ms: { type: 'number' },
+                api_calls_made: { type: 'number' },
+                cache_hits: { type: 'number' },
+                cache_misses: { type: 'number' },
+                batch_processing_used: { type: 'boolean' },
+                parallel_requests: { type: 'number' }
+              }
+            },
+            search_metadata: {
+              type: 'object',
+              properties: {
+                enhanced_query: { type: 'string', description: 'Processed natural language query' },
+                applied_filters: { type: 'array', items: { type: 'string' } },
+                search_strategy: { type: 'string', description: 'Batch processing strategy used' }
+              }
+            }
+          },
+          $defs: {
+            cocktail: {
+              type: 'object',
+              properties: {
+                id: { type: 'number' },
+                name: { type: 'string' },
+                description: { type: 'string' },
+                ingredients: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      formatted: { type: 'string', description: 'Human-readable amount with units' },
+                      amount: { type: 'string' },
+                      optional: { type: 'boolean' }
+                    }
+                  }
+                },
+                instructions: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      step: { type: 'number' },
+                      instruction: { type: 'string' }
+                    }
+                  }
+                },
+                details: {
+                  type: 'object',
+                  properties: {
+                    abv: { type: 'number', description: 'Alcohol by volume percentage' },
+                    glass: { type: 'string', description: 'Recommended glassware' },
+                    method: { type: 'string', description: 'Preparation method' },
+                    garnish: { type: 'string', description: 'Garnish instructions' },
+                    direct_link: { type: 'string', description: 'URL to full recipe page' },
+                    tags: { type: 'array', items: { type: 'string' } }
+                  }
+                }
+              }
+            }
+          }
+        }),
+      },
+      async (args: any) => await this.handleSmartSearchCocktails(args)
+    );
+
+    // Get recipe tool with advanced batch processing
+    server.registerTool(
+      'get_recipe',
+      {
+        title: 'Get Cocktail Recipe',
+        description: `🍸 Advanced recipe retrieval with powerful batch processing for multiple cocktails.
+
+**🚀 BATCH PROCESSING SYSTEM:**
+- **High Performance**: 5-10x faster than sequential requests
+- **Parallel Processing**: Simultaneous API calls with error isolation
+- **Smart Caching**: 70%+ cache hit rate for repeated requests
+- **Flexible Input**: Mix cocktail names and IDs in single request
+- **Error Resilience**: Individual failures don't break entire batch
+
+**📋 LLM Usage Patterns:**
+- **Single Recipe**: When user asks for "how to make [cocktail]"
+- **Recipe Comparison**: When user wants to compare multiple cocktails
+- **Menu Planning**: Batch retrieve recipes for event planning
+- **Variation Exploration**: Get base recipe + similar cocktails
+- **Research Mode**: Efficient lookup of multiple specific recipes
+
+**🎯 Input Methods (Choose Based on Use Case):**
+
+1. **Single Recipe (Backwards Compatible)**:
+- cocktail_name: "Manhattan" → One complete recipe
+- cocktail_id: 123 → Recipe by database ID
+
+2. **Batch by Names (Most Common)**:
+- cocktail_names: ["Negroni", "Manhattan", "Martini"] → Multiple complete recipes
+
+3. **Batch by IDs (When Available)**:
+- cocktail_ids: [1, 2, 3] → Multiple recipes by database IDs
+
+4. **Mixed Batch (Maximum Flexibility)**:
+- cocktail_names: ["Aviation"] + cocktail_ids: [123, 456] → Combined approach
+
+5. **With Variations (Exploration)**:
+- Any above + include_variations: true → Base recipes + similar cocktails
+
+**📊 Response Format:**
+Structured output with complete recipe data:
+- Precise ingredient measurements (auto-converted to oz)
+- Step-by-step preparation instructions
+- Cocktail specifications (ABV, glassware, method, garnish)
+- Direct database links for each recipe
+- Performance metrics (timing, cache usage)
+- Similar recipes when requested
+- Rich formatting with emojis and clear sections
+
+**⚡ Performance Examples:**
+- Single recipe: ~150-300ms (cached responses faster)
+- Batch (3 cocktails): ~250-400ms (vs 900ms+ sequential)
+- Mixed batch (5 cocktails): ~300-500ms with parallel processing
+- Cache hit: <50ms instant response
+
+**🎛️ Batch Control Parameters:**
+- limit: 1-20 recipes (default: 10) - controls batch size
+- include_variations: Boolean - adds similar cocktails to results`,
+        inputSchema: z.fromJSONSchema({
+          type: 'object',
+          description: '🎛️ Flexible input schema supporting single recipes and high-performance batch processing',
+          properties: {
+            // Single recipe parameters (backwards compatible)
+            cocktail_id: {
+              type: 'number',
+              description: '🆔 Single cocktail database ID. Use for specific recipe lookup when ID is known.',
+            },
+            cocktail_name: {
+              type: 'string',
+              description: '🍸 Single cocktail name. Use for individual recipe requests (e.g., "Manhattan", "Negroni").',
+            },
+
+            // Batch processing parameters (high performance)
+            cocktail_ids: {
+              type: 'array',
+              items: { type: 'number' },
+              description: '🚀 Array of cocktail IDs for batch processing. Enables parallel retrieval of multiple recipes by database ID. More efficient than multiple single requests.',
+            },
+            cocktail_names: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '🚀 Array of cocktail names for batch processing. Enables parallel retrieval of multiple recipes by name (e.g., ["Manhattan", "Negroni", "Martini"]). Triggers name resolution + batch fetching.',
+            },
+
+            // Enhancement parameters
+            include_variations: {
+              type: 'boolean',
+              description: '🔄 Include similar/variation recipes in results. Adds related cocktails to expand exploration (default: false).',
+              default: false,
+            },
+
+            // Batch control parameters
+            limit: {
+              type: 'number',
+              description: '🎛️ Maximum number of recipes to return. Controls batch size for optimal performance (default: 10, max: 20). Higher limits may impact response time.',
+              default: 10,
+              minimum: 1,
+              maximum: 20,
+            },
+          },
+          // Schema validation rules for LLMs
+          oneOf: [
+            {
+              description: 'Single recipe by name',
+              required: ['cocktail_name']
+            },
+            {
+              description: 'Single recipe by ID',
+              required: ['cocktail_id']
+            },
+            {
+              description: 'Batch processing by names',
+              required: ['cocktail_names']
+            },
+            {
+              description: 'Batch processing by IDs',
+              required: ['cocktail_ids']
+            },
+            {
+              description: 'Mixed batch processing',
+              anyOf: [
+                { required: ['cocktail_names', 'cocktail_ids'] },
+                { required: ['cocktail_names', 'cocktail_id'] },
+                { required: ['cocktail_name', 'cocktail_ids'] }
+              ]
+            }
+          ],
+        }),
+        outputSchema: z.fromJSONSchema({
+          type: 'object',
+          properties: {
+            recipes: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number' },
+                  name: { type: 'string' },
+                  description: { type: 'string' },
+                  ingredients: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        formatted: { type: 'string' },
+                        amount: { type: 'string' },
+                        optional: { type: 'boolean' }
+                      }
+                    }
+                  },
+                  instructions: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        step: { type: 'number' },
+                        instruction: { type: 'string' }
+                      }
+                    }
+                  },
+                  details: {
+                    type: 'object',
+                    properties: {
+                      abv: { type: 'number' },
+                      glass: { type: 'string' },
+                      method: { type: 'string' },
+                      garnish: { type: 'string' },
+                      direct_link: { type: 'string' },
+                      tags: { type: 'array', items: { type: 'string' } }
+                    }
+                  }
+                }
+              }
+            },
+            performance: {
+              type: 'object',
+              properties: {
+                processing_time: { type: 'number' },
+                recipes_fetched: { type: 'number' },
+                cache_hits: { type: 'number' },
+                batch_processing: { type: 'boolean' }
+              }
+            }
+          }
+        }),
+      },
+      async (args: any) => await this.handleGetRecipe(args) as any
+    );
+
+    server.registerTool(
+      'get_ingredient_info',
+      {
+        title: 'Get Ingredient Information',
+        description: `Get comprehensive information about cocktail ingredients and their usage.
+
+**Use Cases:**
+- Ingredient research: "what is Aperol?", "tell me about gin"
+- Substitution guidance: finding alternatives for unavailable ingredients
+- Usage exploration: see how ingredients are used across different cocktails
+- Flavor profile understanding: learn about ingredient characteristics
+
+**Response Format:**
+Returns detailed ingredient information including:
+- Ingredient description and characteristics
+- List of cocktails using this ingredient (with complete recipes)
+- Suggested substitutions with flavor impact notes
+- Common flavor profiles and tasting notes
+- Direct links to featured cocktails
+
+**Examples:**
+- {ingredient_name: "Campari"} → Campari info + Negroni, Boulevardier recipes
+- {ingredient_name: "rye whiskey"} → Usage in Manhattan, Sazerac, etc.
+- {ingredient_name: "elderflower liqueur"} → Aviation, Paper Plane recipes`,
+        inputSchema: z.fromJSONSchema({
+          type: 'object',
+          properties: {
+            ingredient_name: {
+              type: 'string',
+              description: 'The name of the ingredient to get information about',
+            },
+          },
+          required: ['ingredient_name'],
+        }),
+        outputSchema: z.fromJSONSchema(OutputSchemas.ingredientInfoOutputSchema as any),
+      },
+      async (args: any) => await this.handleGetIngredientInfo(args) as any,
+    );
+
+    return server;
   }
 
   /**
@@ -860,481 +1303,6 @@ class BarAssistantMCPServer {
     const humanText = this.formatSearchResultsText(structuredData, args);
     return this.createStructuredResponse(humanText, structuredData);
   }
-
-  private setupToolHandlers(): void {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: [
-          {
-            name: 'smart_search_cocktails',
-            description: `🚀 PREFERRED TOOL: Advanced cocktail search with intelligent batch processing and complete recipes.
-
-**🎯 BATCH PROCESSING SYSTEM:**
-- **High Performance**: Parallel processing with 5-10x speed improvement
-- **Smart Caching**: Automatic caching for 70%+ faster repeated searches
-- **Error Resilience**: Individual failures don't break entire batch operations
-- **Flexible Limits**: Configure result count (default: 20, max: 50)
-
-**📋 Use Cases:**
-- General searches: "gin cocktails", "winter drinks", "classic cocktails"
-- Similarity queries: "cocktails like Manhattan", "similar to Negroni"
-- Ingredient-based: "cocktails with bourbon", "drinks using Campari"
-- Flavor profiles: "bitter cocktails", "sweet drinks", "herbal spirits"
-- Complex filtering: combine ingredients, ABV ranges, glass types, methods
-- Batch comparisons: Multiple ingredient searches simultaneously
-
-**🔄 Batch Processing Examples:**
-- Single search: {query: "Manhattan"} → Complete recipe + similar cocktails
-- Multi-ingredient: {ingredient: "gin", must_include: ["vermouth", "bitters"]}
-- Similarity batch: {similar_to: "Negroni", limit: 10} → 10 similar cocktails
-- Complex filter: {preferred_flavors: ["bitter"], abv_min: 25, limit: 15}
-
-**📊 Response Format:**
-Returns structured data with complete recipes including:
-- Ingredients with precise measurements in oz (auto-converted from ml)
-- Step-by-step preparation instructions
-- Cocktail specifications (ABV, glass, method, garnish)
-- Direct links to cocktail database pages
-- Performance metrics (processing time, cache hits)
-- Similar cocktail recommendations with full recipes
-
-**⚡ Performance Features:**
-- Parallel API processing for multiple results
-- Intelligent caching system with TTL management
-- Batch fetching of complete recipe details
-- Error isolation and fallback handling`,
-            inputSchema: {
-              type: 'object',
-              properties: {
-                // Core search parameters
-                query: {
-                  type: 'string',
-                  description: '🔍 Natural language search query (e.g., "Negroni", "gin cocktails", "bitter drinks")',
-                },
-                similar_to: {
-                  type: 'string',
-                  description: '🔄 Find cocktails similar to this name (e.g., "Manhattan", "Negroni"). Triggers similarity batch processing.',
-                },
-                similar_to_id: {
-                  type: 'number',
-                  description: '🆔 Find cocktails similar to this ID. Use similar_to (by name) unless you have the specific ID.',
-                },
-
-                // Ingredient filtering (supports batch processing)
-                ingredient: {
-                  type: 'string',
-                  description: '🥃 Primary ingredient filter (e.g., "gin", "whiskey", "campari"). Combines with other filters for batch processing.',
-                },
-                must_include: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: '✅ Required ingredients array. Batch processes cocktails containing ALL these ingredients.',
-                },
-                must_exclude: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: '❌ Excluded ingredients array. Filters out cocktails with ANY of these ingredients.',
-                },
-
-                // Advanced filtering (enhances batch results)
-                preferred_flavors: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: '🎯 Flavor profile preferences: ["bitter", "sweet", "sour", "spicy", "herbal"]. Improves batch ranking.',
-                },
-                preferred_strength: {
-                  type: 'string',
-                  enum: ['light', 'medium', 'strong'],
-                  description: '💪 Alcohol strength preference. Filters batch results by ABV ranges.',
-                },
-                abv_min: {
-                  type: 'number',
-                  description: '📊 Minimum ABV percentage. Lower bound for batch filtering.',
-                },
-                abv_max: {
-                  type: 'number',
-                  description: '📊 Maximum ABV percentage. Upper bound for batch filtering.',
-                },
-
-                // Presentation filtering
-                glass_type: {
-                  type: 'string',
-                  description: '🥂 Required glassware (e.g., "coupe", "rocks", "martini"). Filters entire batch.',
-                },
-                preparation_method: {
-                  type: 'string',
-                  description: '🔧 Required method (e.g., "shake", "stir", "build"). Filters batch by technique.',
-                },
-
-                // Batch control parameters
-                limit: {
-                  type: 'number',
-                  description: '🎛️ Maximum results to return (default: 20, max: 50). Controls batch size for optimal performance.',
-                  default: 20,
-                  minimum: 1,
-                  maximum: 50,
-                },
-              },
-            },
-            outputSchema: {
-              type: 'object',
-              description: '🎯 Batch processing response with complete cocktail data and performance metrics',
-              properties: {
-                search_results: {
-                  type: 'object',
-                  properties: {
-                    total_found: {
-                      type: 'number',
-                      description: 'Total cocktails found matching criteria'
-                    },
-                    returned: {
-                      type: 'number',
-                      description: 'Number of cocktails returned (limited by batch size)'
-                    },
-                    search_type: {
-                      type: 'string',
-                      description: 'Type of search performed (query, similarity, ingredient, etc.)'
-                    }
-                  }
-                },
-                cocktails: {
-                  type: 'array',
-                  description: 'Complete cocktail recipes with full details',
-                  items: { $ref: '#/$defs/cocktail' }
-                },
-                similar_cocktails: {
-                  type: 'array',
-                  description: 'Additional similar cocktails (when using similarity search)',
-                  items: { $ref: '#/$defs/cocktail' }
-                },
-                performance_metrics: {
-                  type: 'object',
-                  description: 'Batch processing performance data',
-                  properties: {
-                    processing_time_ms: { type: 'number' },
-                    api_calls_made: { type: 'number' },
-                    cache_hits: { type: 'number' },
-                    cache_misses: { type: 'number' },
-                    batch_processing_used: { type: 'boolean' },
-                    parallel_requests: { type: 'number' }
-                  }
-                },
-                search_metadata: {
-                  type: 'object',
-                  properties: {
-                    enhanced_query: { type: 'string', description: 'Processed natural language query' },
-                    applied_filters: { type: 'array', items: { type: 'string' } },
-                    search_strategy: { type: 'string', description: 'Batch processing strategy used' }
-                  }
-                }
-              },
-              '$defs': {
-                cocktail: {
-                  type: 'object',
-                  properties: {
-                    id: { type: 'number' },
-                    name: { type: 'string' },
-                    description: { type: 'string' },
-                    ingredients: {
-                      type: 'array',
-                      items: {
-                        type: 'object',
-                        properties: {
-                          name: { type: 'string' },
-                          formatted: { type: 'string', description: 'Human-readable amount with units' },
-                          amount: { type: 'string' },
-                          optional: { type: 'boolean' }
-                        }
-                      }
-                    },
-                    instructions: {
-                      type: 'array',
-                      items: {
-                        type: 'object',
-                        properties: {
-                          step: { type: 'number' },
-                          instruction: { type: 'string' }
-                        }
-                      }
-                    },
-                    details: {
-                      type: 'object',
-                      properties: {
-                        abv: { type: 'number', description: 'Alcohol by volume percentage' },
-                        glass: { type: 'string', description: 'Recommended glassware' },
-                        method: { type: 'string', description: 'Preparation method' },
-                        garnish: { type: 'string', description: 'Garnish instructions' },
-                        direct_link: { type: 'string', description: 'URL to full recipe page' },
-                        tags: { type: 'array', items: { type: 'string' } }
-                      }
-                    }
-                  }
-                }
-              }
-            },
-          },
-          {
-            name: 'get_recipe',
-            description: `🍸 Advanced recipe retrieval with powerful batch processing for multiple cocktails.
-
-**🚀 BATCH PROCESSING SYSTEM:**
-- **High Performance**: 5-10x faster than sequential requests
-- **Parallel Processing**: Simultaneous API calls with error isolation
-- **Smart Caching**: 70%+ cache hit rate for repeated requests
-- **Flexible Input**: Mix cocktail names and IDs in single request
-- **Error Resilience**: Individual failures don't break entire batch
-
-**📋 LLM Usage Patterns:**
-- **Single Recipe**: When user asks for "how to make [cocktail]"
-- **Recipe Comparison**: When user wants to compare multiple cocktails
-- **Menu Planning**: Batch retrieve recipes for event planning
-- **Variation Exploration**: Get base recipe + similar cocktails
-- **Research Mode**: Efficient lookup of multiple specific recipes
-
-**🎯 Input Methods (Choose Based on Use Case):**
-
-1. **Single Recipe (Backwards Compatible)**:
-   - cocktail_name: "Manhattan" → One complete recipe
-   - cocktail_id: 123 → Recipe by database ID
-
-2. **Batch by Names (Most Common)**:
-   - cocktail_names: ["Negroni", "Manhattan", "Martini"] → Multiple complete recipes
-
-3. **Batch by IDs (When Available)**:
-   - cocktail_ids: [1, 2, 3] → Multiple recipes by database IDs
-
-4. **Mixed Batch (Maximum Flexibility)**:
-   - cocktail_names: ["Aviation"] + cocktail_ids: [123, 456] → Combined approach
-
-5. **With Variations (Exploration)**:
-   - Any above + include_variations: true → Base recipes + similar cocktails
-
-**📊 Response Format:**
-Structured output with complete recipe data:
-- Precise ingredient measurements (auto-converted to oz)
-- Step-by-step preparation instructions
-- Cocktail specifications (ABV, glassware, method, garnish)
-- Direct database links for each recipe
-- Performance metrics (timing, cache usage)
-- Similar recipes when requested
-- Rich formatting with emojis and clear sections
-
-**⚡ Performance Examples:**
-- Single recipe: ~150-300ms (cached responses faster)
-- Batch (3 cocktails): ~250-400ms (vs 900ms+ sequential)
-- Mixed batch (5 cocktails): ~300-500ms with parallel processing
-- Cache hit: <50ms instant response
-
-**🎛️ Batch Control Parameters:**
-- limit: 1-20 recipes (default: 10) - controls batch size
-- include_variations: Boolean - adds similar cocktails to results`,
-            inputSchema: {
-              type: 'object',
-              description: '🎛️ Flexible input schema supporting single recipes and high-performance batch processing',
-              properties: {
-                // Single recipe parameters (backwards compatible)
-                cocktail_id: {
-                  type: 'number',
-                  description: '🆔 Single cocktail database ID. Use for specific recipe lookup when ID is known.',
-                },
-                cocktail_name: {
-                  type: 'string',
-                  description: '🍸 Single cocktail name. Use for individual recipe requests (e.g., "Manhattan", "Negroni").',
-                },
-
-                // Batch processing parameters (high performance)
-                cocktail_ids: {
-                  type: 'array',
-                  items: { type: 'number' },
-                  description: '🚀 Array of cocktail IDs for batch processing. Enables parallel retrieval of multiple recipes by database ID. More efficient than multiple single requests.',
-                },
-                cocktail_names: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description: '🚀 Array of cocktail names for batch processing. Enables parallel retrieval of multiple recipes by name (e.g., ["Manhattan", "Negroni", "Martini"]). Triggers name resolution + batch fetching.',
-                },
-
-                // Enhancement parameters
-                include_variations: {
-                  type: 'boolean',
-                  description: '🔄 Include similar/variation recipes in results. Adds related cocktails to expand exploration (default: false).',
-                  default: false,
-                },
-
-                // Batch control parameters
-                limit: {
-                  type: 'number',
-                  description: '🎛️ Maximum number of recipes to return. Controls batch size for optimal performance (default: 10, max: 20). Higher limits may impact response time.',
-                  default: 10,
-                  minimum: 1,
-                  maximum: 20,
-                },
-              },
-              // Schema validation rules for LLMs
-              oneOf: [
-                {
-                  description: 'Single recipe by name',
-                  required: ['cocktail_name']
-                },
-                {
-                  description: 'Single recipe by ID',
-                  required: ['cocktail_id']
-                },
-                {
-                  description: 'Batch processing by names',
-                  required: ['cocktail_names']
-                },
-                {
-                  description: 'Batch processing by IDs',
-                  required: ['cocktail_ids']
-                },
-                {
-                  description: 'Mixed batch processing',
-                  anyOf: [
-                    { required: ['cocktail_names', 'cocktail_ids'] },
-                    { required: ['cocktail_names', 'cocktail_id'] },
-                    { required: ['cocktail_name', 'cocktail_ids'] }
-                  ]
-                }
-              ],
-            },
-            outputSchema: {
-        type: 'object',
-        properties: {
-          recipes: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                id: { type: 'number' },
-                name: { type: 'string' },
-                description: { type: 'string' },
-                ingredients: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string' },
-                      formatted: { type: 'string' },
-                      amount: { type: 'string' },
-                      optional: { type: 'boolean' }
-                    }
-                  }
-                },
-                instructions: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      step: { type: 'number' },
-                      instruction: { type: 'string' }
-                    }
-                  }
-                },
-                details: {
-                  type: 'object',
-                  properties: {
-                    abv: { type: 'number' },
-                    glass: { type: 'string' },
-                    method: { type: 'string' },
-                    garnish: { type: 'string' },
-                    direct_link: { type: 'string' },
-                    tags: { type: 'array', items: { type: 'string' } }
-                  }
-                }
-              }
-            }
-          },
-          performance: {
-            type: 'object',
-            properties: {
-              processing_time: { type: 'number' },
-              recipes_fetched: { type: 'number' },
-              cache_hits: { type: 'number' },
-              batch_processing: { type: 'boolean' }
-            }
-          }
-        }
-      },
-          },
-
-          {
-            name: 'get_ingredient_info',
-            description: `Get comprehensive information about cocktail ingredients and their usage.
-
-**Use Cases:**
-- Ingredient research: "what is Aperol?", "tell me about gin"
-- Substitution guidance: finding alternatives for unavailable ingredients
-- Usage exploration: see how ingredients are used across different cocktails
-- Flavor profile understanding: learn about ingredient characteristics
-
-**Response Format:**
-Returns detailed ingredient information including:
-- Ingredient description and characteristics
-- List of cocktails using this ingredient (with complete recipes)
-- Suggested substitutions with flavor impact notes
-- Common flavor profiles and tasting notes
-- Direct links to featured cocktails
-
-**Examples:**
-- {ingredient_name: "Campari"} → Campari info + Negroni, Boulevardier recipes
-- {ingredient_name: "rye whiskey"} → Usage in Manhattan, Sazerac, etc.
-- {ingredient_name: "elderflower liqueur"} → Aviation, Paper Plane recipes`,
-            inputSchema: {
-              type: 'object',
-              properties: {
-                ingredient_name: {
-                  type: 'string',
-                  description: 'The name of the ingredient to get information about',
-                },
-              },
-              required: ['ingredient_name'],
-            },
-            outputSchema: OutputSchemas.ingredientInfoOutputSchema,
-          },
-
-        ],
-      };
-    });
-
-    // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      try {
-        switch (name) {
-          case 'smart_search_cocktails':
-            return await this.handleSmartSearchCocktails(args as any);
-
-          case 'get_recipe':
-            return await this.handleGetRecipe(args as any);
-
-          case 'get_ingredient_info':
-            return await this.handleGetIngredientInfo(args as any as { ingredient_name: string });
-
-          default:
-            throw new McpError(
-              ErrorCode.MethodNotFound,
-              `Unknown tool: ${name}`
-            );
-        }
-      } catch (error) {
-        console.error(`Error handling tool ${name}:`, error);
-
-        if (error instanceof McpError) {
-          throw error;
-        }
-
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    });
-  }
-
-
 
   // Tool handler methods
   private async handleSearchCocktails(args: SearchCocktailsParams) {
@@ -2420,13 +2388,235 @@ Returns detailed ingredient information including:
   }
 
   async run(): Promise<void> {
+    const server = this.getServer();
     const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    await server.connect(transport);
     // Server is now running - no output to avoid interfering with MCP protocol
+  }
+
+  async runStreamableHttp(port: number): Promise<void> {
+    const app = express();
+
+    app.use(express.json());
+    app.use(morgan('combined'));
+
+    // Rate limiting: 100 requests per 15 minutes
+    const limiter = rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 100,
+      standardHeaders: true,
+      legacyHeaders: false,
+    });
+    app.use(limiter);
+
+    // Set up authentication if configured
+    let authMiddleware = null;
+
+    // API Key Authentication
+    const apiKey = process.env.MCP_API_KEY;
+    if (!apiKey) {
+      console.warn('⚠️  WARNING: MCP_API_KEY environment variable is not set!');
+      console.warn('   The server is running without authentication. This is NOT recommended for public exposure.');
+    } else {
+      authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+        if (!apiKey) return next(); // Skip auth if no key configured (dev mode)
+
+        const authHeader = req.headers.authorization;
+        const queryKey = req.query.apiKey as string;
+
+        // Check Bearer token
+        if (authHeader && authHeader.startsWith('Bearer ') && authHeader.slice(7) === apiKey) {
+          return next();
+        }
+
+        // Check X-API-Key header
+        if (req.headers['x-api-key'] === apiKey) {
+          return next();
+        }
+
+        // Check query parameter (fallback for clients that can't set headers)
+        if (queryKey === apiKey) {
+          return next();
+        }
+
+        res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
+      };
+    }
+
+    // Map to store transports by session ID
+    const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+
+    // MCP POST endpoint with optional auth
+    const mcpPostHandler = async (req: Request, res: Response) => {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        if (sessionId) {
+            console.log(`Received MCP request for session: ${sessionId}`);
+        } else {
+            console.log('Request body:', req.body);
+        }
+
+        try {
+            let transport: StreamableHTTPServerTransport;
+            if (sessionId && transports[sessionId]) {
+                // Reuse existing transport
+                transport = transports[sessionId];
+            } else if (!sessionId && isInitializeRequest(req.body)) {
+                // New initialization request
+                // const eventStore = new InMemoryEventStore();
+                transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => randomUUID(),
+                    // eventStore, // Enable resumability
+                    onsessioninitialized: sessionId => {
+                        // Store the transport by session ID when session is initialized
+                        // This avoids race conditions where requests might come in before the session is stored
+                        console.log(`Session initialized with ID: ${sessionId}`);
+                        transports[sessionId] = transport;
+                    }
+                });
+
+                // Set up onclose handler to clean up transport when closed
+                transport.onclose = () => {
+                    const sid = transport.sessionId;
+                    if (sid && transports[sid]) {
+                        console.log(`Transport closed for session ${sid}, removing from transports map`);
+                        delete transports[sid];
+                    }
+                };
+
+                // Connect the transport to the MCP server BEFORE handling the request
+                // so responses can flow back through the same transport
+                const server = this.getServer();
+                await server.connect(transport);
+
+                await transport.handleRequest(req, res, req.body);
+                return; // Already handled
+            } else {
+                // Invalid request - no session ID or not initialization request
+                res.status(400).json({
+                    jsonrpc: '2.0',
+                    error: {
+                        code: -32000,
+                        message: 'Bad Request: No valid session ID provided'
+                    },
+                    id: null
+                });
+                return;
+            }
+
+            // Handle the request with existing transport - no need to reconnect
+            // The existing transport is already connected to the server
+            await transport.handleRequest(req, res, req.body);
+        } catch (error) {
+            console.error('Error handling MCP request:', error);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    error: {
+                        code: -32603,
+                        message: 'Internal server error'
+                    },
+                    id: null
+                });
+            }
+        }
+    };
+
+    // Set up routes with conditional auth middleware
+    if (authMiddleware) {
+        app.post('/mcp', authMiddleware, mcpPostHandler);
+    } else {
+        app.post('/mcp', mcpPostHandler);
+    }
+
+    // Handle GET requests for SSE streams (using built-in support from StreamableHTTP)
+    const mcpGetHandler = async (req: Request, res: Response) => {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        if (!sessionId || !transports[sessionId]) {
+            res.status(400).send('Invalid or missing session ID');
+            return;
+        }
+
+        // Check for Last-Event-ID header for resumability
+        const lastEventId = req.headers['last-event-id'] as string | undefined;
+        if (lastEventId) {
+            console.log(`Client reconnecting with Last-Event-ID: ${lastEventId}`);
+        } else {
+            console.log(`Establishing new SSE stream for session ${sessionId}`);
+        }
+
+        const transport = transports[sessionId];
+        await transport.handleRequest(req, res);
+    };
+
+    // Set up GET route with conditional auth middleware
+    if (authMiddleware) {
+        app.get('/mcp', authMiddleware, mcpGetHandler);
+    } else {
+        app.get('/mcp', mcpGetHandler);
+    }
+
+    // Handle DELETE requests for session termination (according to MCP spec)
+    const mcpDeleteHandler = async (req: Request, res: Response) => {
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        if (!sessionId || !transports[sessionId]) {
+            res.status(400).send('Invalid or missing session ID');
+            return;
+        }
+
+        console.log(`Received session termination request for session ${sessionId}`);
+
+        try {
+            const transport = transports[sessionId];
+            await transport.handleRequest(req, res);
+        } catch (error) {
+            console.error('Error handling session termination:', error);
+            if (!res.headersSent) {
+                res.status(500).send('Error processing session termination');
+            }
+        }
+    };
+
+    // Set up DELETE route with conditional auth middleware
+    if (authMiddleware) {
+        app.delete('/mcp', authMiddleware, mcpDeleteHandler);
+    } else {
+        app.delete('/mcp', mcpDeleteHandler);
+    }
+
+    app.listen(port, error => {
+        if (error) {
+            console.error('Failed to start server:', error);
+            process.exit(1);
+        }
+        console.log(`Bar Assistant MCP Server running at http://localhost:${port}/mcp`);
+        if (apiKey) {
+          console.log('🔒 Authentication enabled. Clients must provide the API Key.');
+        }
+    });
+
+    // Handle server shutdown
+    process.on('SIGINT', async () => {
+        console.log('Shutting down server...');
+
+        // Close all active transports to properly clean up resources
+        for (const sessionId in transports) {
+            try {
+                console.log(`Closing transport for session ${sessionId}`);
+                await transports[sessionId].close();
+                delete transports[sessionId];
+            } catch (error) {
+                console.error(`Error closing transport for session ${sessionId}:`, error);
+            }
+        }
+        console.log('Server shutdown complete');
+        process.exit(0);
+    });
   }
 
   async runSSE(port: number): Promise<void> {
     const app = express();
+
+    app.use(express.json());
 
     // Security middleware
     app.use(helmet());
@@ -2475,26 +2665,47 @@ Returns detailed ingredient information including:
     app.use(authMiddleware);
 
     // Keep track of the current transport
-    let transport: SSEServerTransport | null = null;
+    let transports: Record<string, SSEServerTransport | null> = {};
 
     app.get('/sse', async (req, res) => {
       console.log('New SSE connection');
-      transport = new SSEServerTransport('/message', res);
-      await this.server.connect(transport);
+      const transport = new SSEServerTransport('/messages', res);
+      transports[transport.sessionId] = transport;
 
       // Clean up when connection closes
       req.on('close', () => {
         console.log('SSE connection closed');
         // Optionally cleanup
+        delete transports[transport.sessionId];
       });
+
+      const server = this.getServer();
+      await server.connect(transport);
     });
 
-    app.post('/message', async (req, res) => {
-      if (!transport) {
-        res.sendStatus(400);
+    app.post('/messages', async (req, res) => {
+      const sessionId = req.query.sessionId as string;
+      let transport: SSEServerTransport;
+      const existingTransport = transports[sessionId];
+      if (existingTransport instanceof SSEServerTransport) {
+        transport = existingTransport;
+      } else {
+        // Transport exists but is not a SSEServerTransport (could be StreamableHTTPServerTransport)
+        res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+                code: -32000,
+                message: 'Bad Request: Session exists but uses a different transport protocol'
+            },
+            id: null
+        });
         return;
       }
-      await transport.handlePostMessage(req, res);
+      if (transport) {
+          await transport.handlePostMessage(req, res, req.body);
+      } else {
+          res.status(400).send('No transport found for sessionId');
+      }
     });
 
     app.get('/debug', (req: Request, res: Response) => {
@@ -2516,6 +2727,9 @@ const server = new BarAssistantMCPServer();
 if (process.argv.includes('--sse')) {
   const port = parseInt(process.env.PORT || '3001', 10);
   server.runSSE(port).catch(console.error);
+} else if (process.argv.includes('--mcp')) {
+  const port = parseInt(process.env.PORT || '3001', 10);
+  server.runStreamableHttp(port).catch(console.error);
 } else {
   server.run().catch(console.error);
 }
