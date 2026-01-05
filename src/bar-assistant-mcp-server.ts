@@ -1001,52 +1001,12 @@ Returns structured data with complete recipes including:
                 cocktails: {
                   type: 'array',
                   description: 'Complete cocktail recipes with full details',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      id: { type: 'number' },
-                      name: { type: 'string' },
-                      description: { type: 'string' },
-                      ingredients: {
-                        type: 'array',
-                        items: {
-                          type: 'object',
-                          properties: {
-                            name: { type: 'string' },
-                            formatted: { type: 'string', description: 'Human-readable amount with units' },
-                            amount: { type: 'string' },
-                            optional: { type: 'boolean' }
-                          }
-                        }
-                      },
-                      instructions: {
-                        type: 'array',
-                        items: {
-                          type: 'object',
-                          properties: {
-                            step: { type: 'number' },
-                            instruction: { type: 'string' }
-                          }
-                        }
-                      },
-                      details: {
-                        type: 'object',
-                        properties: {
-                          abv: { type: 'number', description: 'Alcohol by volume percentage' },
-                          glass: { type: 'string', description: 'Recommended glassware' },
-                          method: { type: 'string', description: 'Preparation method' },
-                          garnish: { type: 'string', description: 'Garnish instructions' },
-                          direct_link: { type: 'string', description: 'URL to full recipe page' },
-                          tags: { type: 'array', items: { type: 'string' } }
-                        }
-                      }
-                    }
-                  }
+                  items: { $ref: '#/$defs/cocktail' }
                 },
                 similar_cocktails: {
                   type: 'array',
                   description: 'Additional similar cocktails (when using similarity search)',
-                  items: { $ref: '#/properties/cocktails/items' }
+                  items: { $ref: '#/$defs/cocktail' }
                 },
                 performance_metrics: {
                   type: 'object',
@@ -1066,6 +1026,49 @@ Returns structured data with complete recipes including:
                     enhanced_query: { type: 'string', description: 'Processed natural language query' },
                     applied_filters: { type: 'array', items: { type: 'string' } },
                     search_strategy: { type: 'string', description: 'Batch processing strategy used' }
+                  }
+                }
+              },
+              '$defs': {
+                cocktail: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'number' },
+                    name: { type: 'string' },
+                    description: { type: 'string' },
+                    ingredients: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          name: { type: 'string' },
+                          formatted: { type: 'string', description: 'Human-readable amount with units' },
+                          amount: { type: 'string' },
+                          optional: { type: 'boolean' }
+                        }
+                      }
+                    },
+                    instructions: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          step: { type: 'number' },
+                          instruction: { type: 'string' }
+                        }
+                      }
+                    },
+                    details: {
+                      type: 'object',
+                      properties: {
+                        abv: { type: 'number', description: 'Alcohol by volume percentage' },
+                        glass: { type: 'string', description: 'Recommended glassware' },
+                        method: { type: 'string', description: 'Preparation method' },
+                        garnish: { type: 'string', description: 'Garnish instructions' },
+                        direct_link: { type: 'string', description: 'URL to full recipe page' },
+                        tags: { type: 'array', items: { type: 'string' } }
+                      }
+                    }
                   }
                 }
               }
