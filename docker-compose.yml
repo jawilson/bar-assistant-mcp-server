@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: bar-assistant-mcp-server
-    command: node dist/bar-assistant-mcp-server.js --sse
+    command: node dist/bar-assistant-mcp-server.js --mcp
     restart: unless-stopped
     ports:
       - "3001:3001"
