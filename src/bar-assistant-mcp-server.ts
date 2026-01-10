@@ -11,7 +11,10 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import {
+  CallToolResult,
   isInitializeRequest,
+  ServerNotification,
+  ServerRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { BarAssistantClient } from './bar-assistant-client.js';
@@ -30,6 +33,7 @@ import * as ResponseSchemas from './response-schemas.js';
 import * as OutputSchemas from './output-schemas.js';
 import { CacheManager } from './cache-manager.js';
 import { QueryParser } from './query-parser.js';
+import { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 
 /**
  * Bar Assistant MCP Server
@@ -287,7 +291,7 @@ Returns structured data with complete recipes including:
           }
         }),
       },
-      async (args: any) => await this.handleSmartSearchCocktails(args)
+      async (args: any, extra) => await this.handleSmartSearchCocktails(server, args, extra.sessionId)
     );
 
     // Get recipe tool with advanced batch processing
@@ -1072,6 +1076,7 @@ Returns detailed ingredient information including:
 
     // Perform the search
     let results = await this.barClient.searchCocktails(searchParams);
+    console.log(results);
     let filteredResults = results.data;
 
     // Apply post-search filtering
@@ -1088,6 +1093,9 @@ Returns detailed ingredient information including:
    * Apply advanced post-search filtering
    */
   private applyAdvancedFilters(results: any[], args: any): any[] {
+    if (!results || results.length === 0) {
+      throw new Error('No results to filter');
+    }
     let filtered = results;
 
     // Filter for additional must_include ingredients
@@ -1724,8 +1732,16 @@ Returns detailed ingredient information including:
     }
   }
 
-  private async handleSmartSearchCocktails(args: SmartSearchCocktailsParams) {
+  private async handleSmartSearchCocktails(server: McpServer, args: SmartSearchCocktailsParams, sessionId: string | undefined): Promise<CallToolResult> {
     const startTime = Date.now();
+
+    await server.sendLoggingMessage(
+      {
+        level: 'debug',
+        data: `Smart search initiated with args: ${JSON.stringify(args)}`,
+      },
+      sessionId
+    );
 
     try {
       // Parse natural language query if provided
@@ -1739,6 +1755,13 @@ Returns detailed ingredient information including:
       const cacheKey = JSON.stringify(enhancedArgs);
       const cachedResult = this.cacheManager.getCachedSearch(cacheKey);
       if (cachedResult) {
+        await server.sendLoggingMessage(
+          {
+            level: 'debug',
+            data: `Smart search cache hit for key: ${cacheKey}`,
+          },
+          sessionId
+        );
         return cachedResult;
       }
 
@@ -1747,11 +1770,34 @@ Returns detailed ingredient information including:
         const result = await this.handleSimilaritySearch(enhancedArgs, startTime);
         // Cache similarity search results
         this.cacheManager.setCachedSearch(cacheKey, result);
-        return result;
+        await server.sendLoggingMessage(
+          {
+            level: 'debug',
+            data: `Smart search similarity search completed and cached for key: ${cacheKey}`,
+          },
+          sessionId
+        );
+        return result as CallToolResult;
       }
+
+      await server.sendLoggingMessage(
+        {
+          level: 'debug',
+          data: `Smart search initiated with args: ${JSON.stringify(args)}`,
+        },
+        sessionId
+      );
 
       // Perform the main search
       const { results, searchType, appliedFilters } = await this.performCocktailSearch(enhancedArgs);
+
+      await server.sendLoggingMessage(
+        {
+          level: 'debug',
+          data: `Smart search completed with results count: ${results.length}`,
+        },
+        sessionId
+      );
 
       // Build structured response
       const structuredData: ResponseSchemas.CocktailSearchResponse = {
@@ -1772,9 +1818,10 @@ Returns detailed ingredient information including:
       // Cache regular search results
       this.cacheManager.setCachedSearch(cacheKey, result);
 
-      return result;
+      return result as CallToolResult;
 
     } catch (error) {
+      console.log('Error during smart search:', error);
       const errorData: ResponseSchemas.ErrorResponse = {
         error: error instanceof Error ? error.message : String(error),
         error_code: 'SEARCH_ERROR',
@@ -1793,7 +1840,7 @@ Returns detailed ingredient information including:
         `**Error:** ${errorData.error}\n\n` +
         `**Suggestions:**\n${errorData.suggestions?.map(s => `• ${s}`).join('\n')}`;
 
-      return this.createStructuredResponse(errorText, errorData);
+      return this.createStructuredResponse(errorText, errorData) as CallToolResult;
     }
   }
 

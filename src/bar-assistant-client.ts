@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
 import {
   BarAssistantConfig,
   CocktailSearchResult,
@@ -24,6 +24,7 @@ export class BarAssistantClient {
 
   constructor(config: BarAssistantConfig) {
     this.config = config;
+    console.log(`Initializing Bar Assistant Client with base URL: ${config.baseUrl}`);
     this.client = axios.create({
       baseURL: config.baseUrl,
       timeout: config.timeout || 30000,
@@ -40,12 +41,47 @@ export class BarAssistantClient {
       (config) => {
         return config;
       },
-      (error) => Promise.reject(error)
+      (error) => {
+        if (error.response) {
+          // The request was made and the server responded with a status code
+          // that falls out of the range of 2xx
+          console.log(error.response.data);
+          console.log(error.response.status);
+          console.log(error.response.headers);
+        } else if (error.request) {
+          // The request was made but no response was received
+          // `error.request` is an instance of XMLHttpRequest in the browser and an instance of
+          // http.ClientRequest in node.js
+          console.log(error.request);
+        } else {
+          // Something happened in setting up the request that triggered an Error
+          console.log('Error', error.message);
+        }
+        console.log(error.config);
+        return Promise.reject(error);
+      }
     );
 
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
+        if (error.response) {
+          // The request was made and the server responded with a status code
+          // that falls out of the range of 2xx
+          console.log(error.response.data);
+          console.log(error.response.status);
+          console.log(error.response.headers);
+        } else if (error.request) {
+          // The request was made but no response was received
+          // `error.request` is an instance of XMLHttpRequest in the browser and an instance of
+          // http.ClientRequest in node.js
+          console.log(error.request);
+        } else {
+          // Something happened in setting up the request that triggered an Error
+          console.log('Error', error.message);
+        }
+        console.log(error.config);
+
         const apiError: ApiError = {
           message: error.response?.data?.message || error.message || 'Unknown API error',
           status: error.response?.status || 500,
@@ -90,7 +126,7 @@ export class BarAssistantClient {
    */
   async searchCocktails(params: SearchCocktailsParams = {}): Promise<CocktailSearchResult> {
     const searchParams = new URLSearchParams();
-    
+
     if (params.query) searchParams.append('filter[name]', params.query);
     if (params.ingredient) searchParams.append('filter[ingredient_name]', params.ingredient);
     if (params.base_spirit) searchParams.append('filter[base_spirit]', params.base_spirit);
@@ -103,10 +139,33 @@ export class BarAssistantClient {
     // Always include ingredients and other related data - try different include formats
     searchParams.append('include', 'ingredients,tags,glass,method,images');
 
-    const response: AxiosResponse<CocktailSearchResult> = await this.client.get(
-      `/api/cocktails?${searchParams.toString()}`
-    );
-    return response.data;
+    console.log('Searching cocktails with params:', searchParams.toString());
+
+    try {
+      const response: AxiosResponse<CocktailSearchResult> = await this.client.get(
+        `/api/cocktails?${searchParams.toString()}`
+      );
+      return response.data;
+    } catch (err) {
+      const error = err as AxiosError;
+      if (error.response) {
+        // The request was made and the server responded with a status code
+        // that falls out of the range of 2xx
+        console.log(error.response.data);
+        console.log(error.response.status);
+        console.log(error.response.headers);
+      } else if (error.request) {
+        // The request was made but no response was received
+        // `error.request` is an instance of XMLHttpRequest in the browser and an instance of
+        // http.ClientRequest in node.js
+        console.log(error.request);
+      } else {
+        // Something happened in setting up the request that triggered an Error
+        console.log('Error', error.message);
+      }
+      console.log(error.config);
+      throw err;
+    }
   }
 
   /**
@@ -127,13 +186,13 @@ export class BarAssistantClient {
     try {
       // First get the base cocktail to understand its profile
       const baseCocktail = await this.getCocktailRecipe(cocktailId);
-      
+
       // Extract key ingredients for similarity matching - use short_ingredients for consistency
       const baseIngredients = (baseCocktail.short_ingredients || baseCocktail.ingredients)?.map((ing: any) => {
         const name = ing.ingredient?.name || ing.name || 'unknown';
         return name.toLowerCase();
       }) || [];
-      
+
       // Get a broader set of cocktails to analyze for similarity
       const searchParams: SearchCocktailsParams = {
         limit: Math.min(limit * 10, 100), // Get many more results to properly analyze
@@ -141,13 +200,13 @@ export class BarAssistantClient {
 
       // Try multiple search strategies to find potentially similar cocktails
       const allPotentialMatches = new Map<number, any>();
-      
+
       // Strategy 1: Search by each key ingredient
       for (const ingredient of baseIngredients.slice(0, 3)) { // Top 3 ingredients
         try {
-          const results = await this.searchCocktails({ 
-            ingredient: ingredient, 
-            limit: 50 
+          const results = await this.searchCocktails({
+            ingredient: ingredient,
+            limit: 50
           });
           results.data.forEach(cocktail => {
             if (cocktail.id !== cocktailId) {
@@ -158,7 +217,7 @@ export class BarAssistantClient {
           // Continue if one ingredient search fails
         }
       }
-      
+
       // Strategy 2: If we don't have enough matches, do a general search
       if (allPotentialMatches.size < limit * 3) {
         try {
@@ -172,23 +231,23 @@ export class BarAssistantClient {
           // General search failed, continue with what we have
         }
       }
-      
+
       // Fetch full details for top candidates to get ingredient data
       // Limit to top 50 candidates to avoid too many API calls
       const candidateIds = Array.from(allPotentialMatches.keys()).slice(0, 50);
-      
+
       const detailedCocktails = new Map<number, any>();
-      
+
       // Batch fetch details with parallel requests (groups of 10)
       const batchSize = 10;
       for (let i = 0; i < candidateIds.length; i += batchSize) {
         const batch = candidateIds.slice(i, i + batchSize);
-        const detailPromises = batch.map(id => 
+        const detailPromises = batch.map(id =>
           this.getCocktailRecipe(id).catch(err => {
             return null;
           })
         );
-        
+
         const results = await Promise.all(detailPromises);
         results.forEach((cocktail, idx) => {
           if (cocktail) {
@@ -196,7 +255,7 @@ export class BarAssistantClient {
           }
         });
       }
-      
+
       // Calculate similarity scores using detailed cocktail data
       const similarCocktails: SimilarCocktail[] = Array.from(detailedCocktails.values())
         .map(cocktail => {
@@ -205,10 +264,10 @@ export class BarAssistantClient {
             const name = ing.ingredient?.name || ing.name || 'unknown';
             return name.toLowerCase();
           }) || [];
-          
+
           const similarity = this.calculateSimilarity(baseIngredients, cocktailIngredients);
           const reasons = this.getSimilarityReasons(baseCocktail, cocktail);
-          
+
           return {
             cocktail,
             similarity_score: similarity,
@@ -216,7 +275,7 @@ export class BarAssistantClient {
           };
         })
         .sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
-      
+
       // Filter and limit results (permissive threshold to allow diverse recommendations)
       const filtered = similarCocktails
         .filter(item => (item.similarity_score || 0) > 0.15) // Meaningful similarity threshold
@@ -264,9 +323,9 @@ export class BarAssistantClient {
       // Return empty inventory if bar doesn't exist or other error
       return {
         available_ingredients: [],
-        missing_ingredients: (params.ingredient_names?.map(name => ({ 
-          id: 0, 
-          name, 
+        missing_ingredients: (params.ingredient_names?.map(name => ({
+          id: 0,
+          name,
           slug: name.toLowerCase(),
           images: [],
           cocktail_ingredient_substitutes: [],
@@ -314,7 +373,7 @@ export class BarAssistantClient {
           if (!availableIngredients.includes(name)) {
             const key = ingredient.id.toString();
             const existing = requiredIngredients.get(key);
-            
+
             if (existing) {
               existing.totalAmount += ingredient.pivot.amount || 0;
               existing.cocktails.push(cocktail.id);
@@ -356,7 +415,7 @@ export class BarAssistantClient {
   async findCocktailByName(name: string): Promise<CocktailSearchResult> {
     // Try exact match first
     let results = await this.searchCocktails({ query: name, limit: 5 });
-    
+
     // If no exact match, try partial matching with different strategies
     if (results.data.length === 0) {
       // Try with partial name
@@ -365,13 +424,13 @@ export class BarAssistantClient {
         // Try first word only
         results = await this.searchCocktails({ query: words[0], limit: 5 });
       }
-      
+
       // If still no results, try searching by ingredient (user might be asking about ingredient-based cocktails)
       if (results.data.length === 0) {
         results = await this.searchCocktails({ ingredient: name, limit: 5 });
       }
     }
-    
+
     return results;
   }
 
@@ -383,7 +442,7 @@ export class BarAssistantClient {
       const response: AxiosResponse<{ data: CocktailCollection[] }> = await this.client.get(
         '/api/collections?include=cocktails'
       );
-      
+
       return response.data.data || [];
     } catch (error) {
       return [];
@@ -413,37 +472,37 @@ export class BarAssistantClient {
 
   private calculateSimilarity(ingredients1: string[], ingredients2: string[]): number {
     if (ingredients1.length === 0 || ingredients2.length === 0) return 0;
-    
+
     const set1 = new Set(ingredients1.map(ing => this.normalizeIngredientName(ing)));
     const set2 = new Set(ingredients2.map(ing => this.normalizeIngredientName(ing)));
-    
+
     // Calculate basic Jaccard similarity
     const intersection = new Set([...set1].filter(x => set2.has(x)));
     const union = new Set([...set1, ...set2]);
     const basicSimilarity = union.size > 0 ? intersection.size / union.size : 0;
-    
+
     // Boost score for shared base spirits (more important)
     const spirits1 = ingredients1.filter(ing => this.isBaseSpirit(ing));
     const spirits2 = ingredients2.filter(ing => this.isBaseSpirit(ing));
-    const sharedSpirits = spirits1.filter(spirit => 
+    const sharedSpirits = spirits1.filter(spirit =>
       spirits2.some(s => this.normalizeIngredientName(spirit) === this.normalizeIngredientName(s))
     );
     const spiritBonus = sharedSpirits.length > 0 ? 0.25 : 0;
-    
+
     // Boost score for shared key modifiers (vermouth, bitters, etc.)
     const modifiers1 = ingredients1.filter(ing => this.isKeyModifier(ing));
     const modifiers2 = ingredients2.filter(ing => this.isKeyModifier(ing));
-    const sharedModifiers = modifiers1.filter(mod => 
+    const sharedModifiers = modifiers1.filter(mod =>
       modifiers2.some(m => this.normalizeIngredientName(mod) === this.normalizeIngredientName(m))
     );
     const modifierBonus = sharedModifiers.length * 0.15;
-    
+
     // Additional bonus for matching multiple ingredients
     const ingredientCountBonus = intersection.size >= 2 ? 0.1 : 0;
-    
+
     return Math.min(1.0, basicSimilarity + spiritBonus + modifierBonus + ingredientCountBonus);
   }
-  
+
   private normalizeIngredientName(ingredient: string): string {
     return ingredient.toLowerCase()
       .replace(/\s+/g, ' ')
@@ -451,17 +510,17 @@ export class BarAssistantClient {
       .replace(/\(.*\)/, '') // Remove parenthetical content
       .trim();
   }
-  
+
   private isBaseSpirit(ingredient: string): boolean {
     const normalized = this.normalizeIngredientName(ingredient);
-    const spirits = ['gin', 'vodka', 'rum', 'whiskey', 'whisky', 'bourbon', 'rye', 'scotch', 
+    const spirits = ['gin', 'vodka', 'rum', 'whiskey', 'whisky', 'bourbon', 'rye', 'scotch',
                    'tequila', 'mezcal', 'brandy', 'cognac', 'armagnac', 'pisco', 'cachaça'];
     return spirits.some(spirit => normalized.includes(spirit));
   }
-  
+
   private isKeyModifier(ingredient: string): boolean {
     const normalized = this.normalizeIngredientName(ingredient);
-    const modifiers = ['vermouth', 'campari', 'aperol', 'bitters', 'cointreau', 'triple sec', 
+    const modifiers = ['vermouth', 'campari', 'aperol', 'bitters', 'cointreau', 'triple sec',
                       'chartreuse', 'benedictine', 'maraschino', 'creme', 'liqueur'];
     return modifiers.some(modifier => normalized.includes(modifier));
   }
@@ -501,7 +560,7 @@ export class BarAssistantClient {
       return name.toLowerCase();
     }) || [];
     const common = ingredients1.filter(ing => ingredients2.includes(ing));
-    
+
     if (common.length > 0) {
       reasons.push(`Shared ingredients: ${common.slice(0, 3).join(', ')}`);
     }
